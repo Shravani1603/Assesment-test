@@ -158,13 +158,19 @@ jobs:
       - name: Extract Outputs
         run: |
           set -eo pipefail
-          SERVER_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip)
-          echo "$SERVER_IP" > ../server_ip.txt
+          # Use printf %s to avoid any trailing newline issues
+          SERVER_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip | tr -d '[:space:]')
+          if [ -z "$SERVER_IP" ]; then
+            echo "Error: Instance IP is empty!"
+            exit 1
+          fi
+          printf "%s" "$SERVER_IP" > ../server_ip.txt
           
+          # Same for private key, but keep it as is since it's a multiline block
           terraform output -state=terraform.tfstate -raw private_key_pem > ../ssh_key.pem
           chmod 600 ../ssh_key.pem
           
-          terraform output -state=terraform.tfstate -raw directus_url > ../directus_url.txt
+          terraform output -state=terraform.tfstate -raw directus_url | tr -d '[:space:]' > ../directus_url.txt
           
           echo "Provisioned IP: $SERVER_IP"
           echo "Waiting 120s for EC2 initialization..."
@@ -199,64 +205,73 @@ jobs:
       - name: Detect SSH User and Wait
         run: |
           set -eo pipefail
-          SERVER_IP=$(cat server_ip.txt)
+          # Clean IP again just to be 100% sure
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          if [ -z "$SERVER_IP" ]; then echo "IP missing"; exit 1; fi
           chmod 600 ssh_key.pem
+          
+          echo "Target IP: '$SERVER_IP'"
           
           USERS=("ubuntu" "ec2-user" "admin" "root")
           DETECTED_USER=""
           
           for i in $(seq 1 30); do
             for user in "${USERS[@]}"; do
-              echo "Trying $user@$SERVER_IP..."
-              if ssh -i ssh_key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$user@$SERVER_IP" "echo SSH_OK" 2>/dev/null; then
+              echo "Checking $user@$SERVER_IP..."
+              # Use -o StrictHostKeyChecking=no and -o UserKnownHostsFile=/dev/null
+              if ssh -i ssh_key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$user@$SERVER_IP" "echo SSH_OK" 2>/dev/null; then
                 echo "$user" > ssh_user.txt
                 DETECTED_USER=$user
-                echo "Success: User is $user"
+                echo "Connected as $user"
                 break 2
               fi
             done
+            echo "Waiting for SSH readiness..."
             sleep 15
           done
           
-          if [ -z "$DETECTED_USER" ]; then exit 1; fi
+          if [ -z "$DETECTED_USER" ]; then 
+            echo "Failed to connect via SSH"
+            exit 1
+          fi
 
       - name: Wait for Docker
         run: |
           set -eo pipefail
-          SERVER_IP=$(cat server_ip.txt)
-          SSH_USER=$(cat ssh_user.txt)
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
           for i in $(seq 1 20); do
-            if ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "docker info >/dev/null 2>&1"; then
+            if ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "docker info >/dev/null 2>&1"; then
               echo "Docker ready!"
               break
             fi
+            echo "Waiting for Docker..."
             sleep 20
           done
 
       - name: Deploy Containers
         run: |
           set -eo pipefail
-          SERVER_IP=$(cat server_ip.txt)
-          SSH_USER=$(cat ssh_user.txt)
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
           
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "mkdir -p ~/directus"
-          scp -i ssh_key.pem -o StrictHostKeyChecking=no docker-compose.yml "$SSH_USER@$SERVER_IP:~/directus/docker-compose.yml"
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "mkdir -p ~/directus"
+          scp -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.yml "$SSH_USER@$SERVER_IP:~/directus/docker-compose.yml"
           
-          # Use EOF without quotes to allow variable expansion of SERVER_IP
-          # BUT we must escape the $ in secrets to prevent them from being expanded locally by shell if they contain $
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cat << EOF > ~/directus/.env
+          # Use single quotes for EOF to prevent local expansion of all $ variables
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "env IP=$SERVER_IP bash -c \"cat << 'EOF' > ~/directus/.env
           ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
           ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           SECRET=${{ secrets.DIRECTUS_SECRET }}
-          SERVER_IP=$SERVER_IP
-          EOF"
+          SERVER_IP=\$IP
+          EOF\""
           
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
 
       - name: Health Check
         run: |
-          SERVER_IP=$(cat server_ip.txt)
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
           for i in $(seq 1 20); do
             if curl -s -o /dev/null -w "%{http_code}" "http://$SERVER_IP:8055/server/ping" | grep -q "200"; then
               echo "Directus is up!"
@@ -269,9 +284,9 @@ jobs:
       - name: Collect logs
         if: always()
         run: |
-          SERVER_IP=$(cat server_ip.txt)
-          SSH_USER=$(cat ssh_user.txt)
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=100" > deployment.log || true
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=100" > deployment.log || true
 
       - name: Upload deployment logs
         if: always()
@@ -295,7 +310,7 @@ jobs:
 
       - name: Homepage Capture
         run: |
-          SERVER_IP=$(cat server_ip.txt)
+          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
           curl -L -o homepage.html "http://$SERVER_IP:8055"
           
       - name: Upload Homepage
@@ -332,9 +347,6 @@ jobs:
           terraform_wrapper: false
       - name: Restore State
         run: |
-          # The artifact contains 'terraform/terraform.tfstate'
-          # If download-artifact v4 keeps structure, it might be in ../terraform/terraform.tfstate
-          # or just ../terraform.tfstate
           find .. -name "terraform.tfstate" -exec cp {} . \;
       - name: Terraform Init
         run: terraform init -backend=false
