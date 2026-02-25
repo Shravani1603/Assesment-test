@@ -7,7 +7,6 @@ on:
 
 env:
   TF_VERSION: "1.7.0"
-  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
 jobs:
   # ─────────────────────────────────────────
@@ -26,18 +25,24 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init -backend=false
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
       - name: Terraform Validate
         run: terraform validate
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
       - name: Save validation report
         run: echo "Terraform validation passed at $(date)" > validation_report.txt
@@ -62,6 +67,8 @@ jobs:
       - name: TFLint Init
         run: tflint --init
         working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run TFLint
         run: tflint --chdir=terraform --format=compact 2>&1 | tee lint_report.txt || true
@@ -101,51 +108,10 @@ jobs:
     defaults:
       run:
         working-directory: terraform
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform Init
-        run: terraform init -backend=false
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Terraform Plan
-        run: |
-          terraform plan \
-            -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
-            -var="ami_id=ami-0b6c6ebed2801a5cb" \
-            -var="project_name=directus-cicd" \
-            -var="instance_type=t2.micro" \
-            -var="environment=production" \
-            -no-color 2>&1 | tee plan_output.txt
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Upload plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-output
-          path: terraform/plan_output.txt
-          retention-days: 7
-
-  # ─────────────────────────────────────────
-  # STAGE 3: PROVISION (MANUAL)
-  # ─────────────────────────────────────────
-  terraform_apply:
-    name: "Provision: Terraform Apply"
-    runs-on: ubuntu-latest
-    needs: [terraform_plan]
-    environment: production   # requires manual approval in GitHub Environments
-    defaults:
-      run:
-        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
 
@@ -157,9 +123,51 @@ jobs:
 
       - name: Terraform Init
         run: terraform init -backend=false
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
+            -var="ami_id=ami-0b6c6ebed2801a5cb" \
+            -var="project_name=directus-cicd" \
+            -var="instance_type=t2.micro" \
+            -var="environment=production" \
+            -no-color 2>&1 | tee plan_output.txt
+
+      - name: Upload plan output
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-output
+          path: terraform/plan_output.txt
+          retention-days: 7
+
+  # ─────────────────────────────────────────
+  # STAGE 3: PROVISION (MANUAL via Environment)
+  # ─────────────────────────────────────────
+  terraform_apply:
+    name: "Provision: Terraform Apply"
+    runs-on: ubuntu-latest
+    needs: [terraform_plan]
+    environment: production
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (with local state)
+        # Use local backend — state file will be saved as artifact
+        run: terraform init -backend=false
 
       - name: Terraform Apply
         run: |
@@ -169,30 +177,37 @@ jobs:
             -var="project_name=directus-cicd" \
             -var="instance_type=t2.micro" \
             -var="environment=production" \
+            -state=terraform.tfstate \
             -auto-approve \
             -no-color 2>&1 | tee apply_output.txt
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Extract Terraform Outputs
-        id: tf_outputs
         run: |
-          SERVER_IP=$(terraform output -raw instance_public_ip)
-          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_OUTPUT
-          echo "$SERVER_IP" > ../server_ip.txt
-          terraform output -raw private_key_pem > ../ssh_key.pem
-          chmod 600 ../ssh_key.pem
-          terraform output -raw directus_url > ../directus_url.txt
+          # Use -state flag to point to where we saved state
+          SERVER_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip)
           echo "Server IP: $SERVER_IP"
-          echo "Directus URL: $(cat ../directus_url.txt)"
-          echo "Waiting 120s for instance to boot and Docker to install..."
-          sleep 120
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Upload connection artifacts
+          # Save artifacts for downstream jobs
+          echo "$SERVER_IP" > /tmp/server_ip.txt
+          cp /tmp/server_ip.txt ../server_ip.txt
+
+          terraform output -state=terraform.tfstate -raw private_key_pem > ../ssh_key.pem
+          chmod 600 ../ssh_key.pem
+
+          DIRECTUS_URL=$(terraform output -state=terraform.tfstate -raw directus_url)
+          echo "$DIRECTUS_URL" > ../directus_url.txt
+
+          echo "=== Infrastructure Summary ==="
+          echo "Server IP: $SERVER_IP"
+          echo "Directus URL: $DIRECTUS_URL"
+          echo "VPC ID: $(terraform output -state=terraform.tfstate -raw vpc_id)"
+          echo "Subnet ID: $(terraform output -state=terraform.tfstate -raw subnet_id)"
+          echo "Security Group ID: $(terraform output -state=terraform.tfstate -raw security_group_id)"
+
+          echo "Waiting 150s for EC2 boot + Docker installation..."
+          sleep 150
+
+      - name: Upload server connection artifacts
         uses: actions/upload-artifact@v4
         with:
           name: server-connection-details
@@ -201,6 +216,7 @@ jobs:
             ssh_key.pem
             directus_url.txt
             terraform/apply_output.txt
+            terraform/terraform.tfstate
           retention-days: 1
 
   # ─────────────────────────────────────────
@@ -222,86 +238,105 @@ jobs:
         run: |
           chmod 600 ssh_key.pem
           mkdir -p ~/.ssh
-          echo "StrictHostKeyChecking no" >> ~/.ssh/config
-          echo "UserKnownHostsFile /dev/null" >> ~/.ssh/config
+          cat >> ~/.ssh/config << 'EOF'
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ServerAliveInterval 60
+          EOF
 
-      - name: Wait for SSH
+      - name: Wait for SSH to be available
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          echo "Connecting to $SERVER_IP..."
-          for i in $(seq 1 30); do
-            if ssh -i ssh_key.pem -o ConnectTimeout=5 ubuntu@$SERVER_IP "echo SSH_OK" 2>/dev/null; then
-              echo "SSH ready!"
+          echo "Waiting for SSH on $SERVER_IP..."
+          for i in $(seq 1 40); do
+            if ssh -i ssh_key.pem -o ConnectTimeout=8 ubuntu@$SERVER_IP "echo SSH_OK" 2>/dev/null; then
+              echo "SSH is ready!"
               break
             fi
-            echo "Attempt $i/30 — waiting 15s..."
+            echo "Attempt $i/40 — waiting 15s..."
             sleep 15
           done
 
-      - name: Wait for Docker
+      - name: Wait for Docker to be ready
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          for i in $(seq 1 20); do
+          echo "Waiting for Docker on $SERVER_IP..."
+          for i in $(seq 1 24); do
             if ssh -i ssh_key.pem ubuntu@$SERVER_IP "docker info >/dev/null 2>&1" 2>/dev/null; then
               echo "Docker is ready!"
+              docker_version=$(ssh -i ssh_key.pem ubuntu@$SERVER_IP "docker --version")
+              echo "Docker version: $docker_version"
               break
             fi
-            echo "Docker not ready yet ($i/20)... waiting 20s"
+            echo "Docker not ready ($i/24)... waiting 20s"
             sleep 20
           done
+
+      - name: Ensure deployment directory exists
+        run: |
+          SERVER_IP=$(cat server_ip.txt)
+          ssh -i ssh_key.pem ubuntu@$SERVER_IP "mkdir -p /home/ubuntu/directus"
 
       - name: Copy docker-compose.yml to server
         run: |
           SERVER_IP=$(cat server_ip.txt)
           scp -i ssh_key.pem docker-compose.yml ubuntu@$SERVER_IP:/home/ubuntu/directus/docker-compose.yml
+          echo "docker-compose.yml copied successfully"
 
-      - name: Generate .env on server
+      - name: Generate .env file on server
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          ssh -i ssh_key.pem ubuntu@$SERVER_IP "
-            cat > /home/ubuntu/directus/.env << 'ENVEOF'
-          ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
-          ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
-          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          SECRET=${{ secrets.DIRECTUS_SECRET }}
-          SERVER_IP=${SERVER_IP}
-          ENVEOF
-            echo '.env created (values masked)'
-          "
+          # Write the .env using printf to avoid heredoc quoting issues with secrets
+          ssh -i ssh_key.pem ubuntu@$SERVER_IP "printf '%s\n' \
+            'ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}' \
+            'ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}' \
+            'DB_PASSWORD=${{ secrets.DB_PASSWORD }}' \
+            'SECRET=${{ secrets.DIRECTUS_SECRET }}' \
+            'SERVER_IP=$SERVER_IP' \
+            > /home/ubuntu/directus/.env
+            echo '.env created (values are masked in logs)'"
 
-      - name: Run Docker Compose
+      - name: Start Directus with Docker Compose
         run: |
           SERVER_IP=$(cat server_ip.txt)
           ssh -i ssh_key.pem ubuntu@$SERVER_IP "
             cd /home/ubuntu/directus
             docker compose up -d
+            echo 'Docker Compose started'
             docker compose ps
           "
 
-      - name: Wait for Directus health
+      - name: Wait for Directus to become healthy
         run: |
           SERVER_IP=$(cat server_ip.txt)
+          echo "Polling http://$SERVER_IP:8055/server/ping ..."
           for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$SERVER_IP:8055/server/ping 2>/dev/null || echo "000")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://$SERVER_IP:8055/server/ping 2>/dev/null || echo "000")
             echo "Attempt $i/30: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
-              echo "Directus is healthy at http://$SERVER_IP:8055"
+              echo "Directus is healthy! Accessible at http://$SERVER_IP:8055"
               break
             fi
             sleep 20
           done
 
-      - name: Collect deploy logs
+      - name: Collect deployment logs
         if: always()
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          ssh -i ssh_key.pem ubuntu@$SERVER_IP "
-            cd /home/ubuntu/directus
-            docker compose ps
-            docker compose logs --tail=30 directus
-          " 2>&1 | tee deployment_log.txt || true
+          {
+            echo "=== Docker Compose Services ==="
+            ssh -i ssh_key.pem ubuntu@$SERVER_IP "cd /home/ubuntu/directus && docker compose ps" 2>/dev/null
+            echo ""
+            echo "=== Directus Logs (last 30 lines) ==="
+            ssh -i ssh_key.pem ubuntu@$SERVER_IP "cd /home/ubuntu/directus && docker compose logs --tail=30 directus" 2>/dev/null
+            echo ""
+            echo "=== PostgreSQL Logs (last 20 lines) ==="
+            ssh -i ssh_key.pem ubuntu@$SERVER_IP "cd /home/ubuntu/directus && docker compose logs --tail=20 database" 2>/dev/null
+          } | tee deployment_log.txt || true
 
-      - name: Upload deploy log
+      - name: Upload deployment log
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -322,22 +357,25 @@ jobs:
         with:
           name: server-connection-details
 
-      - name: Health check
+      - name: Run health check
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          echo "Testing http://$SERVER_IP:8055..."
-          for i in $(seq 1 10); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$SERVER_IP:8055/server/ping)
-            echo "Attempt $i/10: HTTP $STATUS"
+          echo "Health checking http://$SERVER_IP:8055..."
+          PASS=false
+          for i in $(seq 1 12); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://$SERVER_IP:8055/server/ping || echo "000")
+            echo "Attempt $i/12: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
+              PASS=true
               echo "STATUS=PASS" > health_check_result.txt
               echo "URL=http://$SERVER_IP:8055" >> health_check_result.txt
+              echo "HTTP_CODE=$STATUS" >> health_check_result.txt
               echo "Health check PASSED!"
               break
             fi
             sleep 15
           done
-          if ! grep -q "STATUS=PASS" health_check_result.txt 2>/dev/null; then
+          if [ "$PASS" = "false" ]; then
             echo "STATUS=FAIL" > health_check_result.txt
             exit 1
           fi
@@ -360,13 +398,15 @@ jobs:
         with:
           name: server-connection-details
 
-      - name: Download Directus homepage
+      - name: Download Directus homepage HTML
         run: |
           SERVER_IP=$(cat server_ip.txt)
-          curl -L -o directus_homepage.html http://$SERVER_IP:8055
-          wc -c directus_homepage.html
+          echo "Downloading Directus homepage from http://$SERVER_IP:8055"
+          curl -L --max-time 30 -o directus_homepage.html http://$SERVER_IP:8055
+          echo "File size: $(wc -c < directus_homepage.html) bytes"
+          head -5 directus_homepage.html
 
-      - name: Upload homepage
+      - name: Upload homepage artifact
         uses: actions/upload-artifact@v4
         with:
           name: directus-homepage
@@ -390,59 +430,67 @@ jobs:
           name: health-check-result
         continue-on-error: true
 
-      - name: Generate report
+      - name: Generate deployment report
         run: |
-          SERVER_IP=$(cat server_ip.txt || echo "Unknown")
+          SERVER_IP=$(cat server_ip.txt 2>/dev/null || echo "Unknown")
           HEALTH=$(grep "STATUS=" health_check_result.txt 2>/dev/null | cut -d= -f2 || echo "UNKNOWN")
-          cat > deployment_report.md << EOF
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          cat > deployment_report.md << REPORTEOF
           # Directus Deployment Report
-          
-          **Run:** ${{ github.run_id }}
+
+          **Run ID:** ${{ github.run_id }}
           **Commit:** ${{ github.sha }}
           **Branch:** ${{ github.ref_name }}
-          **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          
+          **Date:** ${TIMESTAMP}
+
           ## Infrastructure
-          
+
           | Resource | Value |
           |---|---|
           | Cloud Provider | AWS |
-          | AMI | ami-0b6c6ebed2801a5cb |
-          | Region | ${{ secrets.AWS_DEFAULT_REGION }} |
+          | AMI ID | ami-0b6c6ebed2801a5cb |
+          | Region | us-east-1 |
           | Instance Type | t2.micro |
           | Server IP | ${SERVER_IP} |
-          
-          ## Services
-          
-          | Service | Container | Status |
+
+          ## Deployed Services
+
+          | Service | Container | Port |
           |---|---|---|
-          | Directus CMS | directus_app | Running |
-          | PostgreSQL | directus_db | Running |
-          
-          ## Deployment Access
-          
+          | Directus CMS | directus_app | 8055 |
+          | PostgreSQL DB | directus_db | 5432 |
+
+          ## Access
+
           - **Directus URL:** http://${SERVER_IP}:8055
           - **Admin Panel:** http://${SERVER_IP}:8055/admin
-          
+
           ## Health Check
-          
-          - **Result:** ${HEALTH}
-          - **Endpoint:** http://${SERVER_IP}:8055/server/ping
-          
-          ## Pipeline Summary
-          
-          | Stage | Status |
+
+          | Check | Result |
           |---|---|
-          | Validate | ✅ |
-          | Plan | ✅ |
-          | Provision | ✅ |
-          | Deploy | ✅ |
-          | Test | ${HEALTH} |
-          | Cleanup | ⏸ (manual) |
-          EOF
+          | Directus /server/ping | ${HEALTH} |
+
+          ## Pipeline Stages
+
+          | Stage | Job | Status |
+          |---|---|---|
+          | validate | terraform_validate | ✅ |
+          | validate | terraform_lint | ✅ |
+          | validate | docker_validate | ✅ |
+          | plan | terraform_plan | ✅ |
+          | provision | terraform_apply | ✅ |
+          | deploy | deploy_directus | ✅ |
+          | test | health_check | ${HEALTH} |
+          | test | capture_homepage | ✅ |
+          | test | generate_report | ✅ |
+          | cleanup | terraform_destroy | ⏸ (manual) |
+          REPORTEOF
+
           cat deployment_report.md
 
-      - name: Upload report
+      - name: Upload deployment report
         uses: actions/upload-artifact@v4
         with:
           name: deployment-report
@@ -450,45 +498,61 @@ jobs:
           retention-days: 30
 
   # ─────────────────────────────────────────
-  # STAGE 6: CLEANUP (MANUAL)
+  # STAGE 6: CLEANUP (MANUAL via Environment)
   # ─────────────────────────────────────────
   terraform_destroy:
     name: "Cleanup: Terraform Destroy"
     runs-on: ubuntu-latest
     needs: [generate_report]
-    environment: cleanup    # separate environment requiring manual approval
+    environment: cleanup
     if: always()
     defaults:
       run:
         working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download state from provision stage
+        uses: actions/download-artifact@v4
+        with:
+          name: server-connection-details
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init -backend=false
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Move state file into terraform directory
+        run: |
+          if [ -f "../terraform.tfstate" ]; then
+            cp ../terraform.tfstate terraform.tfstate
+          elif [ -f "terraform.tfstate" ]; then
+            echo "State file already in terraform dir"
+          else
+            echo "WARNING: No state file found. Resources may have been already destroyed."
+          fi
 
       - name: Terraform Destroy
         run: |
-          echo "WARNING: Destroying all provisioned infrastructure!"
+          echo "=== Destroying all provisioned infrastructure ==="
           terraform destroy \
             -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
             -var="ami_id=ami-0b6c6ebed2801a5cb" \
             -var="project_name=directus-cicd" \
             -var="instance_type=t2.micro" \
             -var="environment=production" \
+            -state=terraform.tfstate \
             -auto-approve \
             -no-color 2>&1 | tee destroy_output.txt
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          echo "=== All infrastructure destroyed ==="
 
       - name: Upload destroy log
         uses: actions/upload-artifact@v4
