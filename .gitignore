@@ -1,0 +1,26 @@
+# Terraform state and sensitive files
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+terraform/tfplan
+
+# Secret / credential files
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE and OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.log
+deployment_report.md
+directus_homepage.html
