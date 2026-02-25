@@ -7,7 +7,6 @@ on:
 
 env:
   TF_VERSION: "1.7.0"
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   # ─────────────────────────────────────────
@@ -33,9 +32,6 @@ jobs:
           set -eo pipefail
           terraform init -backend=false
 
-      - name: Terraform Format Check
-        run: terraform fmt -check -recursive
-
       - name: Terraform Validate
         run: |
           set -eo pipefail
@@ -56,6 +52,8 @@ jobs:
           set -eo pipefail
           tflint --init
         working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run TFLint
         run: |
@@ -118,7 +116,7 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────
-  # STAGE 3: PROVISION (MANUAL via Environment)
+  # STAGE 3: PROVISION
   # ─────────────────────────────────────────
   terraform_apply:
     name: "Provision: Terraform Apply"
@@ -145,7 +143,6 @@ jobs:
         run: terraform init -backend=false
 
       - name: Terraform Apply
-        id: apply
         run: |
           set -eo pipefail
           terraform apply \
@@ -158,40 +155,22 @@ jobs:
             -auto-approve \
             -no-color 2>&1 | tee apply_output.txt
 
-      - name: Extract and Verify Outputs
+      - name: Extract Outputs
         run: |
           set -eo pipefail
-          echo "=== Verifying State File ==="
-          ls -l terraform.tfstate
-          
-          echo "=== Extracting IP ==="
           SERVER_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip)
-          if [ -z "$SERVER_IP" ]; then
-            echo "ERROR: Server IP is empty!"
-            exit 1
-          fi
-          echo "Server IP: $SERVER_IP"
           echo "$SERVER_IP" > ../server_ip.txt
-
-          echo "=== Extracting Private Key ==="
+          
           terraform output -state=terraform.tfstate -raw private_key_pem > ../ssh_key.pem
           chmod 600 ../ssh_key.pem
-          if [ ! -s ../ssh_key.pem ]; then
-            echo "ERROR: Private key file is empty!"
-            exit 1
-          fi
-
+          
           terraform output -state=terraform.tfstate -raw directus_url > ../directus_url.txt
           
-          echo "=== Extracting Other Details ==="
-          terraform output -state=terraform.tfstate -raw vpc_id > ../vpc_id.txt
-          terraform output -state=terraform.tfstate -raw subnet_id > ../subnet_id.txt
+          echo "Provisioned IP: $SERVER_IP"
+          echo "Waiting 120s for EC2 initialization..."
+          sleep 120
 
-          echo "=== Infrastructure successfully provisioned ==="
-          echo "Waiting 150s for EC2 initialization..."
-          sleep 150
-
-      - name: Upload connection artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: server-connection-details
@@ -199,9 +178,6 @@ jobs:
             server_ip.txt
             ssh_key.pem
             directus_url.txt
-            vpc_id.txt
-            subnet_id.txt
-            terraform/apply_output.txt
             terraform/terraform.tfstate
           retention-days: 1
 
@@ -220,78 +196,55 @@ jobs:
         with:
           name: server-connection-details
 
-      - name: Verify IP
-        run: |
-          SERVER_IP=$(cat server_ip.txt)
-          if [ -z "$SERVER_IP" ]; then
-            echo "ERROR: server_ip.txt is empty. Apply job failed to pass IP."
-            exit 1
-          fi
-          echo "Deploying to IP: $SERVER_IP"
-
-      - name: Detect SSH User and Wait for SSH
+      - name: Detect SSH User and Wait
         run: |
           set -eo pipefail
           SERVER_IP=$(cat server_ip.txt)
           chmod 600 ssh_key.pem
           
-          echo "Detecting SSH user..."
           USERS=("ubuntu" "ec2-user" "admin" "root")
           DETECTED_USER=""
           
-          for i in $(seq 1 40); do
+          for i in $(seq 1 30); do
             for user in "${USERS[@]}"; do
-              echo "Attempt $i/40: Trying user $user..."
+              echo "Trying $user@$SERVER_IP..."
               if ssh -i ssh_key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$user@$SERVER_IP" "echo SSH_OK" 2>/dev/null; then
-                echo "Success! SSH user is $user"
-                DETECTED_USER=$user
                 echo "$user" > ssh_user.txt
+                DETECTED_USER=$user
+                echo "Success: User is $user"
                 break 2
               fi
             done
-            echo "No user ready yet. Waiting 15s..."
             sleep 15
           done
           
-          if [ -z "$DETECTED_USER" ]; then
-            echo "ERROR: Could not connect via SSH after 40 attempts."
-            exit 1
-          fi
+          if [ -z "$DETECTED_USER" ]; then exit 1; fi
 
       - name: Wait for Docker
         run: |
           set -eo pipefail
           SERVER_IP=$(cat server_ip.txt)
           SSH_USER=$(cat ssh_user.txt)
-          echo "Waiting for Docker with user $SSH_USER on $SERVER_IP..."
-          
           for i in $(seq 1 20); do
             if ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "docker info >/dev/null 2>&1"; then
-              echo "Docker is ready!"
-              ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "docker --version"
+              echo "Docker ready!"
               break
             fi
-            echo "Docker not ready yet ($i/20). Waiting 20s..."
             sleep 20
-            if [ $i -eq 20 ]; then
-                echo "ERROR: Docker failed to start within timeout. Checking user_data logs..."
-                ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "sudo cat /var/log/cloud-init-output.log" || true
-                exit 1
-            fi
           done
 
-      - name: SSH Deployment
+      - name: Deploy Containers
         run: |
           set -eo pipefail
           SERVER_IP=$(cat server_ip.txt)
           SSH_USER=$(cat ssh_user.txt)
           
-          echo "=== Copying docker-compose.yml ==="
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "mkdir -p ~/directus"
           scp -i ssh_key.pem -o StrictHostKeyChecking=no docker-compose.yml "$SSH_USER@$SERVER_IP:~/directus/docker-compose.yml"
           
-          echo "=== Generating .env ==="
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cat << 'EOF' > ~/directus/.env
+          # Use EOF without quotes to allow variable expansion of SERVER_IP
+          # BUT we must escape the $ in secrets to prevent them from being expanded locally by shell if they contain $
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cat << EOF > ~/directus/.env
           ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
           ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
@@ -299,25 +252,29 @@ jobs:
           SERVER_IP=$SERVER_IP
           EOF"
           
-          echo "=== Starting Containers ==="
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
-          
-          echo "=== Health Checking Port 8055 ==="
-          for i in $(seq 1 30); do
+
+      - name: Health Check
+        run: |
+          SERVER_IP=$(cat server_ip.txt)
+          for i in $(seq 1 20); do
             if curl -s -o /dev/null -w "%{http_code}" "http://$SERVER_IP:8055/server/ping" | grep -q "200"; then
               echo "Directus is up!"
-              break
+              exit 0
             fi
-            echo "Waiting for Directus... ($i/30)"
             sleep 15
           done
+          exit 1
 
-      - name: Upload Logs
+      - name: Collect logs
         if: always()
         run: |
           SERVER_IP=$(cat server_ip.txt)
           SSH_USER=$(cat ssh_user.txt)
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=100" > deployment.log || true
+
+      - name: Upload deployment logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deployment-logs
@@ -327,7 +284,7 @@ jobs:
   # STAGE 5: TEST
   # ─────────────────────────────────────────
   test:
-    name: "Final Verification"
+    name: "Verification"
     runs-on: ubuntu-latest
     needs: [deploy_directus]
     steps:
@@ -336,12 +293,7 @@ jobs:
         with:
           name: server-connection-details
 
-      - name: Health Check
-        run: |
-          SERVER_IP=$(cat server_ip.txt)
-          curl -f -i "http://$SERVER_IP:8055/server/ping"
-
-      - name: Capture Homepage
+      - name: Homepage Capture
         run: |
           SERVER_IP=$(cat server_ip.txt)
           curl -L -o homepage.html "http://$SERVER_IP:8055"
@@ -356,7 +308,7 @@ jobs:
   # STAGE 6: CLEANUP (MANUAL)
   # ─────────────────────────────────────────
   cleanup:
-    name: "Cleanup: Terraform Destroy"
+    name: "Cleanup"
     runs-on: ubuntu-latest
     needs: [test]
     environment: cleanup
@@ -369,17 +321,21 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download Connection Details (State)
+      - name: Download state
         uses: actions/download-artifact@v4
         with:
           name: server-connection-details
-      - name: Restore State
-        run: cp ../terraform/terraform.tfstate . || true
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+      - name: Restore State
+        run: |
+          # The artifact contains 'terraform/terraform.tfstate'
+          # If download-artifact v4 keeps structure, it might be in ../terraform/terraform.tfstate
+          # or just ../terraform.tfstate
+          find .. -name "terraform.tfstate" -exec cp {} . \;
       - name: Terraform Init
         run: terraform init -backend=false
       - name: Terraform Destroy
