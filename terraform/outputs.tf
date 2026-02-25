@@ -8,6 +8,21 @@ output "instance_id" {
   value       = aws_instance.directus_server.id
 }
 
+output "vpc_id" {
+  description = "VPC ID"
+  value       = aws_vpc.directus_vpc.id
+}
+
+output "subnet_id" {
+  description = "Public Subnet ID"
+  value       = aws_subnet.directus_public_subnet.id
+}
+
+output "security_group_id" {
+  description = "Security Group ID"
+  value       = aws_security_group.directus_sg.id
+}
+
 output "directus_url" {
   description = "URL to access Directus"
   value       = "http://${aws_instance.directus_server.public_ip}:8055"

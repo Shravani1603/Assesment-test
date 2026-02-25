@@ -25,26 +25,73 @@ resource "aws_key_pair" "directus_keypair" {
 }
 
 # ──────────────────────────────────────────────
-# Latest Ubuntu 22.04 LTS AMI
+# VPC
 # ──────────────────────────────────────────────
-data "aws_ami" "ubuntu_22_04" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
+resource "aws_vpc" "directus_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  tags = {
+    Name        = "${var.project_name}-vpc"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+# ──────────────────────────────────────────────
+# Internet Gateway
+# ──────────────────────────────────────────────
+resource "aws_internet_gateway" "directus_igw" {
+  vpc_id = aws_vpc.directus_vpc.id
+
+  tags = {
+    Name        = "${var.project_name}-igw"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+# ──────────────────────────────────────────────
+# Public Subnet
+# ──────────────────────────────────────────────
+resource "aws_subnet" "directus_public_subnet" {
+  vpc_id                  = aws_vpc.directus_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "${var.aws_region}a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name        = "${var.project_name}-public-subnet"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+# ──────────────────────────────────────────────
+# Route Table (public — routes to IGW)
+# ──────────────────────────────────────────────
+resource "aws_route_table" "directus_public_rt" {
+  vpc_id = aws_vpc.directus_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.directus_igw.id
   }
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+  tags = {
+    Name        = "${var.project_name}-public-rt"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
   }
+}
 
-  filter {
-    name   = "state"
-    values = ["available"]
-  }
+# ──────────────────────────────────────────────
+# Route Table Association
+# ──────────────────────────────────────────────
+resource "aws_route_table_association" "directus_public_rta" {
+  subnet_id      = aws_subnet.directus_public_subnet.id
+  route_table_id = aws_route_table.directus_public_rt.id
 }
 
 # ──────────────────────────────────────────────
@@ -53,6 +100,7 @@ data "aws_ami" "ubuntu_22_04" {
 resource "aws_security_group" "directus_sg" {
   name        = "${var.project_name}-sg"
   description = "Security group for Directus server"
+  vpc_id      = aws_vpc.directus_vpc.id
 
   # SSH access
   ingress {
@@ -98,13 +146,15 @@ resource "aws_security_group" "directus_sg" {
 }
 
 # ──────────────────────────────────────────────
-# EC2 Instance (t2.micro, Ubuntu 22.04 LTS)
+# EC2 Instance (using custom AMI)
 # ──────────────────────────────────────────────
 resource "aws_instance" "directus_server" {
-  ami                    = data.aws_ami.ubuntu_22_04.id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.directus_keypair.key_name
-  vpc_security_group_ids = [aws_security_group.directus_sg.id]
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  key_name                    = aws_key_pair.directus_keypair.key_name
+  vpc_security_group_ids      = [aws_security_group.directus_sg.id]
+  subnet_id                   = aws_subnet.directus_public_subnet.id
+  associate_public_ip_address = true
 
   # Install Docker and Docker Compose at boot
   user_data = <<-EOF
@@ -150,15 +200,11 @@ resource "aws_instance" "directus_server" {
     curl -SL "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
 
-    # Create symlink for 'docker compose' plugin compatibility
-    ln -sf /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose || true
-
     # Create working directory for Directus
     mkdir -p /home/ubuntu/directus
     chown ubuntu:ubuntu /home/ubuntu/directus
 
-    # Signal that user_data completed successfully
-    echo "Docker installation completed at $(date)" > /tmp/docker-setup-complete.txt
+    echo "Docker setup complete at $(date)" > /tmp/docker-setup-complete.txt
   EOF
 
   root_block_device {
