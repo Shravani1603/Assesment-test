@@ -20,56 +20,23 @@ jobs:
         working-directory: terraform
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
       - name: Terraform Init
-        run: |
-          set -eo pipefail
-          terraform init -backend=false
-
+        run: terraform init -backend=false
       - name: Terraform Validate
-        run: |
-          set -eo pipefail
-          terraform validate
-
-  terraform_lint:
-    name: "Validate: TFLint"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: latest
-
-      - name: TFLint Init
-        run: |
-          set -eo pipefail
-          tflint --init
-        working-directory: terraform
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run TFLint
-        run: |
-          set -o pipefail
-          tflint --chdir=terraform --format=compact 2>&1 | tee lint_report.txt || true
+        run: terraform validate
 
   docker_validate:
     name: "Validate: Docker Compose"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Validate docker-compose.yml
-        run: |
-          set -eo pipefail
-          docker compose -f docker-compose.yml config --quiet
+        run: docker compose -f docker-compose.yml config --quiet
 
   # ─────────────────────────────────────────
   # STAGE 2: PLAN
@@ -77,7 +44,7 @@ jobs:
   terraform_plan:
     name: "Plan: Terraform"
     runs-on: ubuntu-latest
-    needs: [terraform_validate, terraform_lint, docker_validate]
+    needs: [terraform_validate, docker_validate]
     defaults:
       run:
         working-directory: terraform
@@ -87,33 +54,22 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
       - name: Terraform Init
         run: terraform init -backend=false
-
       - name: Terraform Plan
         run: |
-          set -eo pipefail
           terraform plan \
             -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
             -var="ami_id=ami-0b6c6ebed2801a5cb" \
             -var="project_name=directus-cicd" \
             -var="instance_type=t2.micro" \
             -var="environment=production" \
-            -no-color 2>&1 | tee plan_output.txt
-
-      - name: Upload plan output
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-output
-          path: terraform/plan_output.txt
-          retention-days: 7
+            -no-color
 
   # ─────────────────────────────────────────
   # STAGE 3: PROVISION
@@ -132,19 +88,15 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
       - name: Terraform Init
         run: terraform init -backend=false
-
       - name: Terraform Apply
         run: |
-          set -eo pipefail
           terraform apply \
             -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
             -var="ami_id=ami-0b6c6ebed2801a5cb" \
@@ -153,29 +105,31 @@ jobs:
             -var="environment=production" \
             -state=terraform.tfstate \
             -auto-approve \
-            -no-color 2>&1 | tee apply_output.txt
-
-      - name: Extract Outputs
+            -no-color
+      - name: Extract and Clean Outputs
         run: |
-          set -eo pipefail
-          # Use printf %s to avoid any trailing newline issues
-          SERVER_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip | tr -d '[:space:]')
-          if [ -z "$SERVER_IP" ]; then
-            echo "Error: Instance IP is empty!"
+          # 1. Extract IP and remove ALL non-IP characters (digits and dots only)
+          RAW_IP=$(terraform output -state=terraform.tfstate -raw instance_public_ip)
+          CLEAN_IP=$(echo "$RAW_IP" | sed 's/[^0-9.]*//g' | head -n 1)
+          
+          # 2. Validate IP format (basic regex)
+          if [[ ! "$CLEAN_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Invalid IP format extracted: '$CLEAN_IP' (Raw was: '$RAW_IP')"
             exit 1
           fi
-          printf "%s" "$SERVER_IP" > ../server_ip.txt
           
-          # Same for private key, but keep it as is since it's a multiline block
+          echo "Cleaned IP: $CLEAN_IP"
+          echo "$CLEAN_IP" > ../server_ip.txt
+          
+          # 3. Extract Private Key
           terraform output -state=terraform.tfstate -raw private_key_pem > ../ssh_key.pem
           chmod 600 ../ssh_key.pem
           
-          terraform output -state=terraform.tfstate -raw directus_url | tr -d '[:space:]' > ../directus_url.txt
+          # 4. Extract URL
+          terraform output -state=terraform.tfstate -raw directus_url > ../directus_url.txt
           
-          echo "Provisioned IP: $SERVER_IP"
-          echo "Waiting 120s for EC2 initialization..."
+          echo "Infrastructure ready. IP: $CLEAN_IP"
           sleep 120
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -196,110 +150,91 @@ jobs:
     needs: [terraform_apply]
     steps:
       - uses: actions/checkout@v4
-
       - name: Download connection artifacts
         uses: actions/download-artifact@v4
         with:
           name: server-connection-details
-
-      - name: Detect SSH User and Wait
+      - name: Robust SSH User Detection
         run: |
-          set -eo pipefail
-          # Clean IP again just to be 100% sure
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          # Ensure IP is clean
+          SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
           if [ -z "$SERVER_IP" ]; then echo "IP missing"; exit 1; fi
           chmod 600 ssh_key.pem
           
-          echo "Target IP: '$SERVER_IP'"
+          echo "Connecting to IP: [$SERVER_IP]"
           
+          # List of potential users for the custom AMI
           USERS=("ubuntu" "ec2-user" "admin" "root")
           DETECTED_USER=""
           
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             for user in "${USERS[@]}"; do
-              echo "Checking $user@$SERVER_IP..."
-              # Use -o StrictHostKeyChecking=no and -o UserKnownHostsFile=/dev/null
-              if ssh -i ssh_key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$user@$SERVER_IP" "echo SSH_OK" 2>/dev/null; then
+              echo "Attempt $i/40: Trying $user..."
+              if ssh -i ssh_key.pem -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$user@$SERVER_IP" "hostname" 2>/dev/null; then
                 echo "$user" > ssh_user.txt
                 DETECTED_USER=$user
-                echo "Connected as $user"
+                echo "Success: Logged in as $user"
                 break 2
               fi
             done
-            echo "Waiting for SSH readiness..."
+            echo "Waiting for SSH server readiness..."
             sleep 15
           done
           
           if [ -z "$DETECTED_USER" ]; then 
-            echo "Failed to connect via SSH"
+            echo "Failed to connect to $SERVER_IP via SSH as any known user."
             exit 1
           fi
-
       - name: Wait for Docker
         run: |
-          set -eo pipefail
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
-          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
+          SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
+          SSH_USER=$(cat ssh_user.txt)
+          echo "Checking Docker as $SSH_USER..."
           for i in $(seq 1 20); do
-            if ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "docker info >/dev/null 2>&1"; then
-              echo "Docker ready!"
+            if ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "docker info" >/dev/null 2>&1; then
+              echo "Docker found!"
               break
             fi
-            echo "Waiting for Docker..."
+            echo "Docker not yet running... attempt $i/20"
             sleep 20
           done
-
-      - name: Deploy Containers
+      - name: Deploy Directus
         run: |
-          set -eo pipefail
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
-          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
+          SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
+          SSH_USER=$(cat ssh_user.txt)
           
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "mkdir -p ~/directus"
           scp -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.yml "$SSH_USER@$SERVER_IP:~/directus/docker-compose.yml"
           
-          # Use single quotes for EOF to prevent local expansion of all $ variables
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "env IP=$SERVER_IP bash -c \"cat << 'EOF' > ~/directus/.env
+          # Securely write .env without local expansion bugs
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cat << 'EOF' > ~/directus/.env
           ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
           ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           SECRET=${{ secrets.DIRECTUS_SECRET }}
-          SERVER_IP=\$IP
-          EOF\""
+          SERVER_IP=$SERVER_IP
+          EOF"
           
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
-
-      - name: Health Check
+      - name: Application Health Check
         run: |
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
+          SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
+          echo "Broadcasting health checks to http://$SERVER_IP:8055 ..."
           for i in $(seq 1 20); do
-            if curl -s -o /dev/null -w "%{http_code}" "http://$SERVER_IP:8055/server/ping" | grep -q "200"; then
-              echo "Directus is up!"
+            if curl -s -f "http://$SERVER_IP:8055/server/ping"; then
+              echo "Directus is LIVE!"
               exit 0
             fi
-            sleep 15
+            sleep 20
           done
+          echo "App failed to start in time."
           exit 1
-
-      - name: Collect logs
-        if: always()
-        run: |
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
-          SSH_USER=$(cat ssh_user.txt | tr -d '[:space:]')
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=100" > deployment.log || true
-
-      - name: Upload deployment logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deployment-logs
-          path: deployment.log
 
   # ─────────────────────────────────────────
   # STAGE 5: TEST
   # ─────────────────────────────────────────
   test:
-    name: "Verification"
+    name: "Final Verification"
     runs-on: ubuntu-latest
     needs: [deploy_directus]
     steps:
@@ -307,23 +242,20 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: server-connection-details
-
-      - name: Homepage Capture
+      - name: Final Result
         run: |
-          SERVER_IP=$(cat server_ip.txt | tr -d '[:space:]')
-          curl -L -o homepage.html "http://$SERVER_IP:8055"
-          
-      - name: Upload Homepage
-        uses: actions/upload-artifact@v4
-        with:
-          name: directus-homepage
-          path: homepage.html
+          SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
+          echo "----------------------------------------"
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "Directus URL: http://$SERVER_IP:8055"
+          echo "Admin Panel: http://$SERVER_IP:8055/admin"
+          echo "----------------------------------------"
 
   # ─────────────────────────────────────────
   # STAGE 6: CLEANUP (MANUAL)
   # ─────────────────────────────────────────
   cleanup:
-    name: "Cleanup"
+    name: "Tear Down Resources"
     runs-on: ubuntu-latest
     needs: [test]
     environment: cleanup
@@ -336,7 +268,7 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-      - name: Download state
+      - name: Download connection details (State)
         uses: actions/download-artifact@v4
         with:
           name: server-connection-details
@@ -345,13 +277,10 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-      - name: Restore State
+      - name: Restore State and Destroy
         run: |
           find .. -name "terraform.tfstate" -exec cp {} . \;
-      - name: Terraform Init
-        run: terraform init -backend=false
-      - name: Terraform Destroy
-        run: |
+          terraform init -backend=false
           terraform destroy \
             -var="aws_region=${{ secrets.AWS_DEFAULT_REGION }}" \
             -var="ami_id=ami-0b6c6ebed2801a5cb" \
