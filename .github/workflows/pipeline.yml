@@ -54,13 +54,19 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
+      - name: Diagnostic: Check Secret Visibility
+        run: |
+          echo "Checking secret visibility in the current job context..."
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ AWS_ACCESS_KEY_ID: Found"; else echo "❌ AWS_ACCESS_KEY_ID: MISSING"; fi
+          if [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "✔️ AWS_SECRET_ACCESS_KEY: Found"; else echo "❌ AWS_SECRET_ACCESS_KEY: MISSING"; fi
+          if [ -n "${{ secrets.AWS_DEFAULT_REGION }}" ]; then echo "✔️ AWS_DEFAULT_REGION: Found"; else echo "❌ AWS_DEFAULT_REGION: MISSING"; fi
       - name: Check Secrets
         run: |
           ERROR=0
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "::error::AWS_ACCESS_KEY_ID is missing!"; ERROR=1; fi
           if [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "::error::AWS_SECRET_ACCESS_KEY is missing!"; ERROR=1; fi
           if [ $ERROR -eq 1 ]; then
-            echo "::error::Missing AWS credentials. Go to Settings > Secrets and variables > Actions and add them as REPOSITORY SECRETS."
+            echo "::error::Missing AWS credentials. IMPORTANT: You must add these as 'REPOSITORY SECRETS' in Settings > Secrets and variables > Actions. If you added them to an 'Environment', they will not be visible for this planning job."
             exit 1
           fi
       - name: Setup Terraform
@@ -97,13 +103,20 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
+      - name: Diagnostic: Check Secret Visibility
+        run: |
+          echo "Checking secret visibility in the current job context..."
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ AWS_ACCESS_KEY_ID: Found"; else echo "❌ AWS_ACCESS_KEY_ID: MISSING"; fi
+          if [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "✔️ AWS_SECRET_ACCESS_KEY: Found"; else echo "❌ AWS_SECRET_ACCESS_KEY: MISSING"; fi
+          if [ -n "${{ secrets.ADMIN_EMAIL }}" ]; then echo "✔️ ADMIN_EMAIL: Found"; else echo "❌ ADMIN_EMAIL: MISSING"; fi
+          if [ -n "${{ secrets.ADMIN_PASSWORD }}" ]; then echo "✔️ ADMIN_PASSWORD: Found"; else echo "❌ ADMIN_PASSWORD: MISSING"; fi
       - name: Check Secrets
         run: |
           ERROR=0
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "::error::AWS_ACCESS_KEY_ID is missing!"; ERROR=1; fi
           if [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "::error::AWS_SECRET_ACCESS_KEY is missing!"; ERROR=1; fi
           if [ $ERROR -eq 1 ]; then
-            echo "::error::Missing AWS credentials. Go to Settings > Secrets and variables > Actions and add them as REPOSITORY SECRETS."
+            echo "::error::Missing AWS credentials. IMPORTANT: You must add these as 'REPOSITORY SECRETS' in Settings > Secrets and variables > Actions. If you added them to an 'Environment' other than 'production', they will not be visible for this job."
             exit 1
           fi
           if [ -z "${{ secrets.ADMIN_EMAIL }}" ] || [ -z "${{ secrets.ADMIN_PASSWORD }}" ]; then
