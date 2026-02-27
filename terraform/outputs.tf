@@ -1,11 +1,11 @@
 output "instance_public_ip" {
   description = "Public IP address of the EC2 instance"
-  value       = aws_instance.directus_server.public_ip
+  value       = aws_instance.directus.public_ip
 }
 
 output "instance_id" {
   description = "EC2 instance ID"
-  value       = aws_instance.directus_server.id
+  value       = aws_instance.directus.id
 }
 
 output "vpc_id" {
@@ -25,7 +25,7 @@ output "security_group_id" {
 
 output "directus_url" {
   description = "URL to access Directus"
-  value       = "http://${aws_instance.directus_server.public_ip}:8055"
+  value       = "http://${aws_instance.directus.public_ip}:8055"
 }
 
 output "private_key_pem" {

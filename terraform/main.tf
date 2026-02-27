@@ -148,7 +148,7 @@ resource "aws_security_group" "directus_sg" {
 # ──────────────────────────────────────────────
 # EC2 Instance (using custom AMI)
 # ──────────────────────────────────────────────
-resource "aws_instance" "directus_server" {
+resource "aws_instance" "directus" {
   ami                         = var.ami_id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.directus_keypair.key_name
