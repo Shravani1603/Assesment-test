@@ -45,7 +45,6 @@ jobs:
     name: "Plan: Terraform"
     runs-on: ubuntu-latest
     needs: [terraform_validate, docker_validate]
-    environment: production
     defaults:
       run:
         working-directory: terraform
@@ -55,12 +54,19 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-      - name: "Diagnostic: Check Secret Visibility"
+      - name: "Diagnostic: Check Secret/Var Visibility"
         run: |
-          echo "Checking secret visibility in the current job context..."
-          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ AWS_ACCESS_KEY_ID: Found"; else echo "❌ AWS_ACCESS_KEY_ID: MISSING"; fi
-          if [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "✔️ AWS_SECRET_ACCESS_KEY: Found"; else echo "❌ AWS_SECRET_ACCESS_KEY: MISSING"; fi
-          if [ -n "${{ secrets.AWS_DEFAULT_REGION }}" ]; then echo "✔️ AWS_DEFAULT_REGION: Found"; else echo "❌ AWS_DEFAULT_REGION: MISSING"; fi
+          echo "Checking visibility of credential names..."
+          # Check Secrets
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ secret.AWS_ACCESS_KEY_ID: FOUND"; else echo "❌ secret.AWS_ACCESS_KEY_ID: MISSING"; fi
+          if [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then echo "✔️ secret.AWS_SECRET_ACCESS_KEY: FOUND"; else echo "❌ secret.AWS_SECRET_ACCESS_KEY: MISSING"; fi
+          
+          # Check Variables (common mistake)
+          if [ -n "${{ vars.AWS_ACCESS_KEY_ID }}" ]; then echo "⚠️ var.AWS_ACCESS_KEY_ID: FOUND (Should be a secret!)"; fi
+          if [ -n "${{ vars.AWS_SECRET_ACCESS_KEY }}" ]; then echo "⚠️ var.AWS_SECRET_ACCESS_KEY: FOUND (Should be a secret!)"; fi
+          
+          # Check Alternatives
+          if [ -n "${{ secrets.AWS_ACCESS_KEY }}" ]; then echo "⚠️ secret.AWS_ACCESS_KEY: FOUND (Standard is AWS_ACCESS_KEY_ID)"; fi
       - name: Check Secrets
         run: |
           ERROR=0
@@ -184,7 +190,6 @@ jobs:
     name: "Deploy: Directus via SSH"
     runs-on: ubuntu-latest
     needs: [terraform_apply]
-    environment: production
     steps:
       - uses: actions/checkout@v4
       - name: Download connection artifacts
