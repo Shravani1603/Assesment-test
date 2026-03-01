@@ -9,9 +9,9 @@ env:
   TF_VERSION: "1.7.0"
 
 jobs:
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 1: VALIDATE
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   terraform_validate:
     name: "Validate: Terraform"
     runs-on: ubuntu-latest
@@ -38,9 +38,9 @@ jobs:
       - name: Validate docker-compose.yml
         run: docker compose -f docker-compose.yml config --quiet
 
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 2: PLAN
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   terraform_plan:
     name: "Plan: Terraform"
     runs-on: ubuntu-latest
@@ -54,7 +54,7 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-      - name: Diagnostic: Check Secret Visibility
+      - name: "Diagnostic: Check Secret Visibility"
         run: |
           echo "Checking secret visibility in the current job context..."
           if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ AWS_ACCESS_KEY_ID: Found"; else echo "❌ AWS_ACCESS_KEY_ID: MISSING"; fi
@@ -86,9 +86,9 @@ jobs:
             -var="environment=production" \
             -no-color
 
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 3: PROVISION
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   terraform_apply:
     name: "Provision: Terraform Apply"
     runs-on: ubuntu-latest
@@ -103,7 +103,7 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - uses: actions/checkout@v4
-      - name: Diagnostic: Check Secret Visibility
+      - name: "Diagnostic: Check Secret Visibility"
         run: |
           echo "Checking secret visibility in the current job context..."
           if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then echo "✔️ AWS_ACCESS_KEY_ID: Found"; else echo "❌ AWS_ACCESS_KEY_ID: MISSING"; fi
@@ -176,9 +176,9 @@ jobs:
             terraform/terraform.tfstate
           retention-days: 1
 
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 4: DEPLOY
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   deploy_directus:
     name: "Deploy: Directus via SSH"
     runs-on: ubuntu-latest
@@ -243,12 +243,12 @@ jobs:
           
           # Securely write .env without local expansion bugs
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cat << EOF > ~/directus/.env
-ADMIN_EMAIL='${{ secrets.ADMIN_EMAIL }}'
-ADMIN_PASSWORD='${{ secrets.ADMIN_PASSWORD }}'
-DB_PASSWORD='${{ secrets.DB_PASSWORD }}'
-SECRET='${{ secrets.DIRECTUS_SECRET }}'
-SERVER_IP=$SERVER_IP
-EOF"
+          ADMIN_EMAIL='${{ secrets.ADMIN_EMAIL }}'
+          ADMIN_PASSWORD='${{ secrets.ADMIN_PASSWORD }}'
+          DB_PASSWORD='${{ secrets.DB_PASSWORD }}'
+          SECRET='${{ secrets.DIRECTUS_SECRET }}'
+          SERVER_IP=\$SERVER_IP
+          EOF"
           
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
       - name: Application Health Check
@@ -267,9 +267,9 @@ EOF"
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$(cat ssh_user.txt)@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=50"
           exit 1
 
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 5: TEST
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   test:
     name: "Final Verification"
     runs-on: ubuntu-latest
@@ -288,9 +288,9 @@ EOF"
           echo "Admin Panel: http://$SERVER_IP:8055/admin"
           echo "----------------------------------------"
 
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   # STAGE 6: CLEANUP (MANUAL)
-  # ─────────────────────────────────────────
+  # -----------------------------------------
   cleanup:
     name: "Tear Down Resources"
     runs-on: ubuntu-latest
