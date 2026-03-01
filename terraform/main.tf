@@ -219,3 +219,12 @@ resource "aws_instance" "directus" {
     ManagedBy   = "Terraform"
   }
 }
+
+# ──────────────────────────────────────────────
+# Elastic IP Association (Conditional)
+# ──────────────────────────────────────────────
+resource "aws_eip_association" "directus_eip_assoc" {
+  count       = var.elastic_ip != "" ? 1 : 0
+  instance_id = aws_instance.directus.id
+  public_ip   = var.elastic_ip
+}

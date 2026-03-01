@@ -13,7 +13,7 @@ variable "ami_id" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t2.micro"
+  default     = "t3.micro"
 }
 
 variable "project_name" {
@@ -23,7 +23,12 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "Environment name"
+  description = "Execution environment (e.g., production, staging)"
   type        = string
-  default     = "production"
+}
+
+variable "elastic_ip" {
+  description = "Existing Elastic IP to associate with the instance"
+  type        = string
+  default     = ""
 }

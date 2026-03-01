@@ -242,13 +242,13 @@ jobs:
           scp -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.yml "$SSH_USER@$SERVER_IP:~/directus/docker-compose.yml"
           
           # Securely write .env without local expansion bugs
-          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cat << 'EOF' > ~/directus/.env
-          ADMIN_EMAIL=${{ secrets.ADMIN_EMAIL }}
-          ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
-          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          SECRET=${{ secrets.DIRECTUS_SECRET }}
-          SERVER_IP=$SERVER_IP
-          EOF"
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cat << EOF > ~/directus/.env
+ADMIN_EMAIL='${{ secrets.ADMIN_EMAIL }}'
+ADMIN_PASSWORD='${{ secrets.ADMIN_PASSWORD }}'
+DB_PASSWORD='${{ secrets.DB_PASSWORD }}'
+SECRET='${{ secrets.DIRECTUS_SECRET }}'
+SERVER_IP=$SERVER_IP
+EOF"
           
           ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$SSH_USER@$SERVER_IP" "cd ~/directus && docker compose up -d"
       - name: Application Health Check
