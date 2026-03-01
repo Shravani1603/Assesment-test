@@ -163,7 +163,6 @@ resource "aws_instance" "directus" {
 
     # Update system packages
     apt-get update -y
-    apt-get upgrade -y
 
     # Install prerequisites
     apt-get install -y \

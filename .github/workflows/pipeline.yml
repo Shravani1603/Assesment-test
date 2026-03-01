@@ -256,13 +256,15 @@ EOF"
           SERVER_IP=$(cat server_ip.txt | sed 's/[^0-9.]*//g' | head -n 1)
           echo "Broadcasting health checks to http://$SERVER_IP:8055 ..."
           for i in $(seq 1 20); do
+            echo "Attempt $i/20: Checking Directus health at http://$SERVER_IP:8055..."
             if curl -s -f "http://$SERVER_IP:8055/server/ping"; then
               echo "Directus is LIVE!"
               exit 0
             fi
             sleep 20
           done
-          echo "App failed to start in time."
+          echo "::error::App failed to start in time. Fetching logs for diagnosis..."
+          ssh -i ssh_key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$(cat ssh_user.txt)@$SERVER_IP" "cd ~/directus && docker compose ps && docker compose logs --tail=50"
           exit 1
 
   # ─────────────────────────────────────────

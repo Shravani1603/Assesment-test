@@ -1,6 +1,6 @@
 output "instance_public_ip" {
   description = "Public IP address of the EC2 instance"
-  value       = aws_instance.directus.public_ip
+  value       = var.elastic_ip != "" ? var.elastic_ip : aws_instance.directus.public_ip
 }
 
 output "instance_id" {
